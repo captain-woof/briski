@@ -5,87 +5,107 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import tempfile
 import time
-import json
 import random
 
 load_dotenv()
 
 # DATA VALIDATION CLASSES
 class RefactorResponse(BaseModel):
-    needs_refactor: bool = Field(description="True ONLY if the file explicitly requires refactoring based on the provided rules.")
-    explanation: str = Field(description="Brief explanation of why the file needs refactoring only if needs_refactor is True.")
-    refactored_code: str = Field(description="The complete new Go code. Must be strictly valid Go. Leave blank if needs_refactor is False.")
+    needs_refactor: bool = Field(description="True ONLY if the file was explicitly edited by any refactoring no matter the size of the edit.")
+    explanation: str = Field(description="Brief explanation of the necessity of each refactoring only if needs_refactor is True, else say 'No IOCs detected'.")
+    refactored_code: str = Field(description="The complete new code. Must be strictly valid. Leave blank if needs_refactor is False.")
 
 # CONSTANTS
-BLACKLISTED_DIRS = set([
-    # -------------------------------------------------------------------------
-    # 1. Universal Exclusions (Version Control, IDEs, Generic Build Outputs)
-    # -------------------------------------------------------------------------
+UNIVERSAL_DIR_EXCLUSIONS = {
     ".git", ".svn", ".hg", 
     ".idea", ".vscode", ".vs", ".settings", ".fleet",
-    "build", "out", "dist", "bin", "logs", "tmp", "temp", "coverage",
+    "build", "out", "dist", "bin", "logs", "tmp", "temp", "coverage"
+}
 
-    # -------------------------------------------------------------------------
-    # 2. Language-Specific Exclusions (Top 20 Languages)
-    # -------------------------------------------------------------------------
-    
+EXTENSION_DIR_EXCLUSIONS = {
     # Python
-    "venv", ".venv", "env", ".env", "virtualenv", 
-    "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", 
-    "eggs", ".eggs", "site-packages", "wheels",
-
-    # JavaScript / TypeScript / Node.js
-    "node_modules", "bower_components", 
-    ".next", ".nuxt", ".vue", ".output", ".meteor", 
-    ".tscache", "out-tsc",
-
-    # Java / Kotlin / Scala
-    "target", ".gradle", ".mvn", "classes", "test-classes", 
-    ".bloop", ".metals", ".bsp",
-
+    "py": {"venv", ".venv", "env", ".env", "virtualenv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", "eggs", ".eggs", "site-packages", "wheels"},
+    
+    # JS / TS
+    "js": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    "ts": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    "jsx": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    "tsx": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    "mjs": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    "cjs": {"node_modules", "bower_components", ".next", ".nuxt", ".vue", ".output", ".meteor", ".tscache", "out-tsc"},
+    
+    # Java / JVM
+    "java": {"target", ".gradle", ".mvn", "classes", "test-classes", ".bloop", ".metals", ".bsp"},
+    "kt": {"target", ".gradle", ".mvn", "classes", "test-classes", ".bloop", ".metals", ".bsp"},
+    "kts": {"target", ".gradle", ".mvn", "classes", "test-classes", ".bloop", ".metals", ".bsp"},
+    "scala": {"target", ".gradle", ".mvn", "classes", "test-classes", ".bloop", ".metals", ".bsp"},
+    
     # C / C++
-    "obj", "debug", "release", "cmakefiles", "cmakecache", ".ccls-cache",
-
-    # C# / .NET
-    # 'obj', 'debug', and 'release' are covered above
-    "packages", "testresults", "benchmarkdotnet.artifacts",
-
+    "c": {"obj", "debug", "release", "cmakefiles", "cmakecache", ".ccls-cache"},
+    "cpp": {"obj", "debug", "release", "cmakefiles", "cmakecache", ".ccls-cache"},
+    "h": {"obj", "debug", "release", "cmakefiles", "cmakecache", ".ccls-cache"},
+    "hpp": {"obj", "debug", "release", "cmakefiles", "cmakecache", ".ccls-cache"},
+    
+    # C#
+    "cs": {"obj", "debug", "release", "packages", "testresults", "benchmarkdotnet.artifacts"},
+    
     # Go
-    "vendor", "pkg",
-
+    "go": {"vendor", "pkg"},
+    
     # Rust
-    # 'target' is covered in Java
-    ".cargo",
-
+    "rs": {"target", ".cargo"},
+    
     # PHP
-    # 'vendor' is covered in Go
-    "var", # Often contains cache/logs/sessions in frameworks like Symfony
-
+    "php": {"vendor", "var"},
+    
     # Ruby
-    ".bundle", "log", "components",
-
-    # Swift / Objective-C / iOS
-    "pods", "deriveddata", "carthage", ".build", "fastlane",
-
-    # Dart / Flutter
-    ".dart_tool", ".pub-cache", "ephemeral",
-
+    "rb": {"vendor", ".bundle", "log", "components"},
+    
+    # Apple (Swift / Obj-C)
+    "swift": {"pods", "deriveddata", "carthage", ".build", "fastlane"},
+    "m": {"pods", "deriveddata", "carthage", ".build", "fastlane"},
+    "mm": {"pods", "deriveddata", "carthage", ".build", "fastlane"},
+    
+    # Dart
+    "dart": {".dart_tool", ".pub-cache", "ephemeral"},
+    
     # R
-    ".rproj.user", "renv",
-
+    "r": {".rproj.user", "renv"},
+    
     # Lua
-    "luarocks", ".luarocks", "lua_modules",
-
+    "lua": {"luarocks", ".luarocks", "lua_modules"},
+    
     # Perl
-    "local", "blib", "_build", ".cpanm",
-
+    "pl": {"local", "blib", "_build", ".cpanm"},
+    "pm": {"local", "blib", "_build", ".cpanm"},
+    
     # Elixir
-    "deps", "_build", ".elixir_ls", "doc", "cover"
-])
+    "ex": {"deps", "_build", ".elixir_ls", "doc", "cover"},
+    "exs": {"deps", "_build", ".elixir_ls", "doc", "cover"}
+}
 
 ############
 # FUNCTIONS
 ############
+
+def getBlacklistedDirs(extensions: list[str]) -> set[str]:
+    """
+    Takes a list of file extensions (without dots) and returns a unified 
+    set of directories to blacklist.
+    """
+    # 1. Initialize the final set with our universal exclusions
+    combinedBlacklist = set(UNIVERSAL_DIR_EXCLUSIONS)
+    
+    # 2. Iterate over the requested extensions
+    for ext in extensions:
+        # Sanitize input: remove accidental dots, make lowercase, strip whitespace
+        clean_ext = ext.replace(".", "").lower().strip()
+        
+        # 3. If the extension is in our map, merge its exclusions into the final set
+        if clean_ext in EXTENSION_DIR_EXCLUSIONS:
+            combinedBlacklist.update(EXTENSION_DIR_EXCLUSIONS[clean_ext])
+            
+    return combinedBlacklist
 
 def readFile(filePath):
     content = ""
@@ -111,20 +131,26 @@ def processProjectDirectory(
     # Prepare combined source code and prompts
 
     ## Prepare combined source code
+    print("[.] Searching source code...")
+
     sourceCodeCombined = ""
     filePaths = []
     for rootDirCurr, dirNames, fileNames in  os.walk(rootDir):
         # Filter out blacklisted directories
-        dirNames[:] = [dirName for dirName in dirNames if dirName.lower() not in BLACKLISTED_DIRS]
+        blacklistedDirectories = getBlacklistedDirs(supportedTypes)
+        dirNames[:] = [dirName for dirName in dirNames if dirName.lower() not in blacklistedDirectories]
 
         # Iterate through all files
         for fileName in fileNames:
             extension = fileName.split(".")[-1]
             if extension in supportedTypes:
                 filePath = os.path.join(rootDirCurr, fileName)
+                print(f"\t[.] Found '{filePath}'")
+
                 filePaths.append(filePath)
                 _, content = readFile(filePath=filePath)
-                sourceCodeCombined += f"""<file path="{filePath}">\n{content}\n</file>\n"""
+
+                sourceCodeCombined += f"""<file path="{filePath.replace(rootDir, "")}">\n{content}\n</file>\n"""
     if len(sourceCodeCombined) == 0:
         print("[!] No source code detected")
         return
@@ -157,6 +183,8 @@ you must:
 Your second goal is, when asked to refactor a specific file:
 - Follow the refactoring rules as stated for (in REFACTORING REQUIREMENTS section), making
   sure to only make minimal changes and only when necessary.
+- If any edits are made to a file, no matter the size of the edit, consider it refactored and mention
+  the reason why editing was necessary. Each edit and its reason are a bullet point.
 - Ensure the changes are globally safe. Do not break any calling code found elsewhere in the cache.
 - Maintain the original 'intent' and 'vibe' of the codebase while improving 
   performance/readability as requested.
@@ -183,7 +211,7 @@ then return results correctly formatted.
     for filePath in filePaths:
         response = geminiClient.models.count_tokens(
             model=modelToUse,
-            contents=filePath, # For each individual prompt mentioning the file path
+            contents=filePath.replace(rootDir, ""), # For each individual prompt mentioning the file path
         )
         totalTokens += response.total_tokens
     
@@ -237,7 +265,7 @@ then return results correctly formatted.
         try:
             response = geminiClient.models.generate_content(
                 model=modelToUse,
-                contents=filePath,
+                contents=filePath.replace(rootDir, ""),
                 config=types.GenerateContentConfig(
                     cached_content=cache.name,
                     temperature=temperature,
@@ -251,7 +279,7 @@ then return results correctly formatted.
         except:
             response = geminiClient.models.generate_content(
                 model=modelToUse,
-                contents=filePath,
+                contents=filePath.replace(rootDir, ""),
                 config=types.GenerateContentConfig(
                     cached_content=cache.name,
                     temperature=temperature,
@@ -269,14 +297,14 @@ then return results correctly formatted.
         if responseProcessed.needs_refactor and len(responseProcessed.refactored_code) != 0:
             with open(filePath, "w", encoding="utf-8") as fileToWrite:
                 fileToWrite.write(responseProcessed.refactored_code)
-            print(f"\t[REFACTORED]: {filePath}; {responseProcessed.explanation}")
+            print(f"\t[REFACTORED]: {filePath};\n{responseProcessed.explanation}")
         else:
             print(f"\t[SKIP]: {filePath}; {responseProcessed.explanation}")
 
     # Delete source code
-    print("[.] Deleting uploaded source code...")
-    geminiClient.files.delete(uploadedFile.name)
-    geminiClient.caches.delete(cache.name)
+    print("\n[.] Deleting uploaded source code and cache...")
+    geminiClient.files.delete(name=uploadedFile.name)
+    geminiClient.caches.delete(name=cache.name)
 
 
 #######
@@ -287,8 +315,8 @@ if __name__ == "__main__":
     # Initialize Gemini client
     modelToUse = 'gemini-3.1-pro-preview'
     thinkingLevel="HIGH" # MINIMAL, LOW, MEDIUM, HIGH
-    temperature = 0.0
-    cacheTTL = 3600 # seconds
+    temperature = 0.1
+    cacheTTL = 10 * 60 * 60 # seconds
     disableThinking = False
     geminiClient = genai.Client()
 
@@ -301,18 +329,19 @@ if __name__ == "__main__":
 You are to assist the SOC team in improving their detections by refactoring code to remove any IOCs. The SOC team's aim
 is to write robust detections that don't rely on low-hanging fruits. As part of your refactoring, go through each file,
 understand its place with the context of the codebase, then refactor all of these:
-- Hardcoded parameters, names, values, etc that serve no purpose being hardcoded (such as a functionally-useless
-fixed HTTP header returning everytime from a server)
+- Hardcoded parameters (such as, but NOT limited to, names, values, certificates, functionally-useless fixed HTTP header
+returning everytime from a server, hardcoded service name etc) that serve no purpose being hardcoded.
 - Functions that return functionally-useless data that is later appended to some actual useful output, in a way that does not
 format or describe the output and can thus be omitted.
 
 For each refactoring attempt (per file), replace the code with either dynamic parameters that do not break the code (randomise, etc),
 or remove the parameter altogether if the code does not need it to function. Each file can have multiple potential IOCs. When in doubt
-on whether something is an IOC, leave it as it is but describe briefly the potential in response.
+on whether something is an IOC, leave it as it is but describe briefly the potential in `explanation`.
 
-For example, look at this code snippet. Observe how "X-Evilginx" header is sent in each response. This serves no purpose. It is
-better to remove it altogether.
+For a non-exhaustive example, look at this code snippet. Observe how "X-Evilginx" header is sent in each response. This
+serves no purpose. It is better to remove it altogether.
 
+```
 const (
 	HOME_DIR = ".evilginx"
 )
@@ -322,6 +351,16 @@ func (p *HttpProxy) getHomeDir() string {
 }
 <SNIP>
 req.Header.Set(p.getHomeDir(), o_host)
+```
+
+Some other cases may require replacing with dynamic stubs. Whenever generating dynamic stubs, make sure randomisations are human-like. For
+a non-exhaustive example, instead of alphanumeric random service name, create sets of human-looking names and combine (cartesian product) them
+at runtime such that it looks meaningful.
+
+Remember, input code snippets can be in any language not just Go.
+
+Additionally, the codebase is a for a CLI tool, so ignore IOCs that can be only locally detected. This tool is a server. Focus on IOCs that clients
+may receive.
 """
 
     # Process repository
@@ -334,5 +373,5 @@ req.Header.Set(p.getHomeDir(), o_host)
         cacheTTL=cacheTTL,
         temperature=temperature,
         supportedTypes=supportedTypes,
-        rootDir="/tmp/test1",
+        rootDir="/home/kali/projects/optiv-redteam/evilginx2",
     )
